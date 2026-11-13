@@ -1,23 +1,24 @@
 # DeepL Word Document Translator
 
-A Python GUI application for translating Microsoft Word documents using the DeepL API. Features a user-friendly interface with progress tracking, comprehensive content translation (paragraphs, tables, and text boxes), and automatic formatting preservation.
+A Python application for translating Microsoft Word documents with the DeepL API, available as a desktop GUI, a web app and a command-line tool. It translates paragraphs, tables, text boxes, headers, footers and footnotes while keeping the original formatting.
 
-![Python](https://img.shields.io/badge/python-3.7+-blue.svg)
+![Python](https://img.shields.io/badge/python-3.9+-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 
 ## Features
 
-- **Full-Featured GUI** - Easy-to-use tkinter interface
+- **Full-Featured GUI** - Easy-to-use tkinter interface (plus a Flask web app and a CLI)
 - **Comprehensive Translation**:
-  - Document paragraphs
-  - Table cells
-  - Text boxes (via Word COM automation)
-- **27 Supported Languages** - Wide range of target languages
+  - Document paragraphs and table cells
+  - Text boxes
+  - All headers, footers, footnotes and endnotes
+- **Formatting Preservation** - Bold, italic, fonts, colours and links stay on the right words
+- **30+ Languages** - Live list from DeepL, including EN-GB/EN-US and PT-PT/PT-BR
+- **Fast** - Paragraphs are sent in batches and repeated text is translated once
+- **Cross-platform** - No Microsoft Word needed
 - **Real-Time Progress Tracking** - Progress bar and detailed status log
-- **API Key Management** - Secure storage with show/hide toggle
-- **Formatting Preservation** - Maintains original document structure
-- **Smart Filtering** - Skips numbers and empty content
-- **Multi-threaded** - Non-blocking UI during translation
+- **API Key Management** - Stored in `.env`, with show/hide toggle
+- **Smart Filtering** - Skips empty text and text with no letters (numbers, dates)
 
 ## Screenshots
 
@@ -30,8 +31,7 @@ A Python GUI application for translating Microsoft Word documents using the Deep
 
 ## Requirements
 
-- Python 3.7+
-- Microsoft Word (for text box translation - Windows only)
+- Python 3.9+
 - DeepL API key ([Get one here](https://www.deepl.com/pro-api))
 
 ## Installation
@@ -76,7 +76,7 @@ python dl_translator.py
 
 3. **Choose Language**
    - Select target language from dropdown
-   - 27 languages available
+   - The list is loaded from DeepL when your key is set
 
 4. **Start Translation**
    - Click "Start Translation" button
@@ -88,69 +88,59 @@ python dl_translator.py
    - Format: `{original}_{lang}_{timestamp}.docx`
    - Example: `report_fr_1729705432.docx`
 
+## Other Ways to Run
+
+```bash
+python app.py                          # web app at http://127.0.0.1:5000
+python op2.py report.docx --lang de    # command line
+```
+
 ## Supported Languages
 
-| Code | Language   | Code | Language   | Code | Language    |
-|------|------------|------|------------|------|-------------|
-| BG   | Bulgarian  | IT   | Italian    | RO   | Romanian    |
-| CS   | Czech      | JA   | Japanese   | RU   | Russian     |
-| DA   | Danish     | LT   | Lithuanian | SK   | Slovak      |
-| DE   | German     | LV   | Latvian    | SL   | Slovenian   |
-| EL   | Greek      | NL   | Dutch      | SV   | Swedish     |
-| EN   | English    | PL   | Polish     | TR   | Turkish     |
-| ES   | Spanish    | PT   | Portuguese | UK   | Ukrainian   |
-| ET   | Estonian   | FR   | French     | ZH   | Chinese     |
-| FI   | Finnish    | HU   | Hungarian  | ID   | Indonesian  |
+The GUI and CLI show DeepL's current list. Built-in fallback:
+
+| Code | Language | Code | Language | Code | Language |
+|------|----------|------|----------|------|----------|
+| AR | Arabic | HU | Hungarian | PT-BR | Portuguese (Brazilian) |
+| BG | Bulgarian | ID | Indonesian | PT-PT | Portuguese (European) |
+| CS | Czech | IT | Italian | RO | Romanian |
+| DA | Danish | JA | Japanese | RU | Russian |
+| DE | German | KO | Korean | SK | Slovak |
+| EL | Greek | LT | Lithuanian | SL | Slovenian |
+| EN-GB | English (British) | LV | Latvian | SV | Swedish |
+| EN-US | English (American) | NB | Norwegian (Bokmål) | TH | Thai |
+| ES | Spanish | NL | Dutch | TR | Turkish |
+| ET | Estonian | PL | Polish | UK | Ukrainian |
+| FI | Finnish | HE | Hebrew | VI | Vietnamese |
+| FR | French | ZH-HANS | Chinese (Simplified) | ZH-HANT | Chinese (Traditional) |
 
 ## How It Works
 
-### Translation Process
-
-1. **Document Loading** - Opens .docx using `python-docx`
-2. **Content Collection** - Identifies paragraphs and table cells
-3. **Batch 1: Paragraphs** - Translates all paragraphs via DeepL API
-4. **Batch 2: Tables** - Translates all table cell content
-5. **Save Temporary** - Saves intermediate file
-6. **Text Boxes** - Uses Word COM to access and translate text boxes
-7. **Final Save** - Outputs completed file with timestamp
-
-### Smart Content Filtering
-
-The application intelligently skips:
-- Empty or whitespace-only text
-- Pure numbers (e.g., "123.45")
-- Content that shouldn't be translated
-
-### Rate Limiting
-
-Includes a **0.4-second delay** between API calls to respect DeepL rate limits and prevent quota exhaustion.
+1. **Open** - A `.docx` is a ZIP of XML files; the body, headers, footers, footnotes and endnotes are read with `lxml`
+2. **Collect** - Every paragraph is gathered, including those in tables and text boxes
+3. **Tag** - Each formatted run is wrapped in a tag so DeepL translates around the formatting
+4. **Translate** - Unique paragraphs are sent in batches of up to 50 with DeepL's XML tag handling
+5. **Write back** - Translations are put back into the original runs, keeping their formatting
+6. **Save** - The package is rewritten with everything else untouched
 
 ## Technical Details
 
 ### Dependencies
 
 - **deepl** - Official DeepL API client
-- **python-docx** - Word document manipulation
-- **pywin32** - Windows COM automation for text boxes
+- **lxml** - Word document XML processing
 - **python-dotenv** - Environment variable management
+- **flask** - Web app
 - **tkinter** - GUI framework (included in Python)
 
 ### Architecture
 
-- **GUI Layer** - tkinter-based interface
-- **Translation Logic** - DeepL API integration
-- **Document Processing** - python-docx + Word COM
-- **Threading** - Async translation with UI updates
+- **Engine** - `docx_translate.py`, shared by all front ends
+- **GUI** - `dl_translator.py`; translation runs on a worker thread and UI updates go through a queue
+- **Web** - `app.py`; uploads are processed in memory with per-user progress
+- **CLI** - `op2.py`
 
-### Platform Support
-
-| Platform | Paragraph/Table Translation | Text Box Translation |
-|----------|----------------------------|----------------------|
-| Windows  | ✅ Full Support            | ✅ Full Support      |
-| macOS    | ✅ Full Support            | ❌ Not Supported     |
-| Linux    | ✅ Full Support            | ❌ Not Supported     |
-
-*Text box translation requires Microsoft Word (COM automation)*
+Works the same on Windows, macOS and Linux.
 
 ## File Output Format
 
@@ -176,18 +166,13 @@ Translated files use the naming pattern:
 - Verify API key has sufficient quota
 - Ensure document isn't corrupted or password-protected
 
-### Text boxes not translating
-- **Windows**: Ensure Microsoft Word is installed
-- **macOS/Linux**: Text box translation not supported (COM limitation)
-- Close any open Word instances before translating
+### "Could not load language list"
+- The key is missing or invalid, or you are offline; the built-in list is used instead
 
 ### Import errors on startup
 ```bash
 # Install all requirements
 pip install -r requirements.txt
-
-# Windows-specific: Install pywin32
-pip install pywin32
 ```
 
 ## Security Best Practices
@@ -224,7 +209,7 @@ Contributions welcome! Please:
 ## Roadmap
 
 - [ ] Batch document processing
-- [ ] Cross-platform text box support
+- [x] Cross-platform text box support
 - [ ] Translation memory/cache
 - [ ] Source language auto-detection
 - [ ] Formality level settings
@@ -238,8 +223,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## Acknowledgments
 
 - [DeepL](https://www.deepl.com/) for their excellent translation API
-- [python-docx](https://python-docx.readthedocs.io/) library maintainers
-- [pywin32](https://github.com/mhammond/pywin32) project
+- [lxml](https://lxml.de/) library maintainers
 
 ## Support
 

@@ -2,273 +2,101 @@
 
 ## Overview
 
-`dl_translator.py` is a GUI-based application that translates Microsoft Word documents using the DeepL API. It provides a user-friendly interface for translating documents while preserving formatting and handling various content types including paragraphs, tables, and text boxes.
+The project translates Microsoft Word (`.docx`) documents with the DeepL API while keeping their formatting. All front ends share one engine:
 
-## Features
-
-- **Graphical User Interface** - Easy-to-use tkinter-based GUI
-- **Comprehensive Translation** - Translates paragraphs, table cells, and text boxes
-- **API Key Management** - Secure storage in .env file with show/hide toggle
-- **27 Supported Languages** - Wide range of target languages
-- **Progress Tracking** - Real-time progress bar and detailed status log
-- **Multi-threaded** - Non-blocking UI during translation
-- **Automatic File Naming** - Output files include language code and timestamp
+| File | Role |
+|---|---|
+| `docx_translate.py` | Shared translation engine (no UI) |
+| `dl_translator.py` | Desktop GUI (tkinter) |
+| `app.py` + `templates/index.html` | Web front end (Flask) |
+| `op2.py` | Command-line tool (`tl_fast.py` and `tldl.py` are kept as aliases) |
 
 ## Dependencies
 
-```python
-deepl              # DeepL API client
-python-docx        # Word document manipulation
-pywin32            # Windows COM automation for text boxes
-python-dotenv      # Environment variable management
-tkinter            # GUI framework (standard library)
+```
+deepl          DeepL API client
+lxml           .docx XML processing
+python-dotenv  Loads DEEPL_API_KEY from .env
+flask          Web front end only
+tkinter        GUI / file dialog (standard library)
 ```
 
-## Installation
+Microsoft Word and pywin32 are **not** required.
 
 ```bash
-pip install deepl python-docx pywin32 python-dotenv
+pip install -r requirements.txt
 ```
 
-## Usage
+## Configuration
 
-### Running the Application
+The API key is read from the `DEEPL_API_KEY` environment variable or from the `.env` file **next to the scripts** (not the current working directory), so the tools work from any folder. Never put the key in source code.
 
-```bash
-python dl_translator.py
-```
+Optional settings for the web app:
 
-### Workflow
+| Variable | Purpose |
+|---|---|
+| `FLASK_SECRET_KEY` | Session signing key. A random one is generated at start-up if unset. |
+| `FLASK_DEBUG=1` | Enables Flask debug mode. Off by default; never enable it on a shared network. |
 
-1. **Enter API Key** - Input your DeepL API key (can be saved to .env)
-2. **Select Document** - Browse and select a .docx file
-3. **Choose Target Language** - Select from 27 available languages
-4. **Start Translation** - Click "Start Translation" button
-5. **Monitor Progress** - Watch progress bar and status log
-6. **Access Output** - Translated file saved with format: `{original}_{lang}_{timestamp}.docx`
+## How the engine works (`docx_translate.py`)
 
-## Application Structure
+1. **Open the package.** A `.docx` is a ZIP. The engine reads these parts:
+   `word/document.xml`, every `word/headerN.xml` and `word/footerN.xml`, `word/footnotes.xml` and `word/endnotes.xml`.
+2. **Collect paragraphs.** Every `<w:p>` in those parts is a candidate, including paragraphs inside tables and text boxes (`<w:txbxContent>`), and the legacy VML copy of each text box. Text belonging to a paragraph nested inside another (a text box anchored in a paragraph) is kept separate.
+3. **Filter.** Paragraphs with no letters at all (numbers, dates, symbols) are skipped.
+4. **Encode formatting.** Each text run becomes an `<s>` tag, e.g. `The <s>quick</s> brown fox`. Whitespace at the edges of runs is kept outside the tags so spaces between differently formatted words survive.
+5. **De-duplicate and batch.** Identical paragraphs are sent once. Texts go to DeepL in batches of up to 50 per request with `tag_handling="xml"`, so DeepL translates around the tags. No artificial delays are needed; the DeepL client retries on rate-limit responses.
+6. **Write back.** The translated pieces are put back into the original runs in reading order, so bold/italic/fonts/colours/hyperlinks stay attached. If DeepL reorders words across tags, the text order is always correct and only the formatting may shift to a neighbouring word.
+7. **Save.** The ZIP is rewritten entry by entry, keeping the original order and every untouched part byte for byte. Input and output can be file paths or in-memory file objects.
 
-### Class: `TranslatorGUI`
-
-Main application class managing the GUI and translation logic.
-
-#### Initialization (`__init__`, lines 14-31)
+Public API:
 
 ```python
-def __init__(self, root):
-    # Initialize window
-    # Load API key from .env
-    # Setup UI components
+import docx_translate as dt
+client = dt.make_client(dt.load_api_key())
+stats = dt.translate_docx("in.docx", "out.docx", "FR", client,
+                          progress=lambda done, total: ..., log=print)
+# stats == {"paragraphs": <unique paragraphs sent>, "characters": <characters sent>}
 ```
 
-**Variables:**
-- `file_path` - Selected Word document path
-- `api_key` - DeepL API key
-- `target_lang` - Target language code (default: "FR")
-- `is_translating` - Translation state flag
+Other helpers: `fetch_target_languages(client)`, `normalize_lang(code)` (maps bare `EN`/`PT`/`ZH` to `EN-GB`/`PT-PT`/`ZH-HANS`), `output_path_for(path, lang)`, and the fallback list `TARGET_LANGUAGES`.
 
-#### UI Components (`setup_ui`, lines 33-101)
+## Desktop GUI (`dl_translator.py`)
 
-1. **API Key Section** (lines 38-49)
-   - Entry field with password masking
-   - Show/Hide toggle button
-   - Save to .env button
+- Loads the key from `.env`; **Save to .env** writes it next to the scripts.
+- Fetches the current target-language list from DeepL when a key is available and falls back to the built-in list otherwise. Languages are shown as `French (FR)`.
+- Translation runs on a worker thread. The worker never touches widgets: it posts log, progress and completion messages to a queue that the Tk main loop drains every 100 ms, because Tk is not thread-safe.
+- On failure, any partially written output file is deleted.
 
-2. **File Selection** (lines 51-60)
-   - Read-only path display
-   - Browse button for file dialog
+Output name: `{original}_{lang}_{unix_timestamp}.docx`, e.g. `report_fr_1729705432.docx`, saved next to the source file.
 
-3. **Language Selection** (lines 62-78)
-   - Dropdown combo box
-   - 27 language options
+## Web front end (`app.py`)
 
-4. **Progress Tracking** (lines 80-88)
-   - Progress bar (determinate mode)
-   - Counter label (X / Y format)
+- Uploads are processed entirely in memory. Nothing is written to disk, so simultaneous users can't overwrite each other's files.
+- The browser generates a job id per submission and polls `/progress/<job_id>`, so each user sees only their own progress.
+- `/quota` shows the account's character usage.
+- Offers every DeepL target language (loaded at start-up; restart to pick up new ones), with a type-to-filter search box. French is preselected (`DEFAULT_LANGUAGE`).
+- Uploads are limited to 50 MB, and only languages from that list are accepted.
 
-5. **Status Log** (lines 90-96)
-   - Scrollable text area
-   - Read-only display
-   - Auto-scroll to bottom
+Run with `python app.py`, then open http://127.0.0.1:5000.
 
-6. **Translate Button** (lines 98-101)
-   - Start/Stop translation
-   - State management
+## Command line (`op2.py`)
 
-### Key Methods
+```bash
+python op2.py                         # file dialog + language prompt
+python op2.py report.docx --lang de   # non-interactive
+```
 
-#### `toggle_api_key()` (lines 103-107)
-Toggles API key visibility between masked and plain text.
+## Supported languages
 
-#### `save_api_key()` (lines 109-121)
-Saves API key to .env file with validation.
+The GUI and CLI use DeepL's live list. The fallback list is:
+AR, BG, CS, DA, DE, EL, EN-GB, EN-US, ES, ET, FI, FR, HE, HU, ID, IT, JA, KO, LT, LV, NB, NL, PL, PT-BR, PT-PT, RO, RU, SK, SL, SV, TH, TR, UK, VI, ZH-HANS, ZH-HANT.
 
-#### `select_file()` (lines 123-130)
-Opens file dialog for .docx selection and updates UI.
-
-#### `log(message)` (lines 132-137)
-Appends messages to status log with auto-scroll.
-
-#### `start_translation()` (lines 139-162)
-- Validates inputs (API key, file path)
-- Initializes UI for translation state
-- Spawns translation thread
-
-#### `translate_document()` (lines 164-280)
-Main translation logic executed in separate thread.
-
-**Translation Process:**
-
-1. **Initialization** (lines 165-173)
-   - Load file path and target language
-   - Initialize DeepL translator
-   - Define translation filter
-
-2. **Document Loading** (lines 179-196)
-   - Load .docx using python-docx
-   - Collect paragraphs to translate
-   - Collect table cell paragraphs
-   - Calculate total items
-   - Update progress display
-
-3. **Paragraph Translation** (lines 198-210)
-   - Iterate through paragraphs
-   - Translate text via DeepL API
-   - Update paragraph in-place
-   - Log progress
-   - 0.4 second delay between calls
-
-4. **Table Cell Translation** (lines 212-224)
-   - Iterate through table paragraphs
-   - Translate text via DeepL API
-   - Update cell in-place
-   - Log progress
-   - 0.4 second delay between calls
-
-5. **Save Temporary File** (lines 226-229)
-   - Save document as temp file
-   - Prepare for COM automation
-
-6. **Text Box Translation** (lines 231-252)
-   - Open document via Word COM
-   - Find shapes with text
-   - Translate text box content
-   - Update text boxes
-   - 0.4 second delay between calls
-
-7. **Finalization** (lines 254-270)
-   - Save final document with timestamp
-   - Close Word COM objects
-   - Delete temporary file
-   - Display success message
-
-8. **Error Handling** (lines 272-279)
-   - Catch and log exceptions
-   - Reset UI state
-   - Show error dialog
-
-### Helper Function
-
-#### `should_translate(text)` (lines 175-177)
-Determines if text should be translated.
-
-**Logic:**
-- Returns `False` for empty/whitespace text
-- Returns `False` for numeric-only content (e.g., "123.45")
-- Returns `True` otherwise
-
-## Supported Languages
-
-| Language    | Code | Language   | Code |
-|-------------|------|------------|------|
-| Bulgarian   | BG   | Italian    | IT   |
-| Czech       | CS   | Japanese   | JA   |
-| Danish      | DA   | Lithuanian | LT   |
-| German      | DE   | Latvian    | LV   |
-| Greek       | EL   | Dutch      | NL   |
-| English     | EN   | Polish     | PL   |
-| Spanish     | ES   | Portuguese | PT   |
-| Estonian    | ET   | Romanian   | RO   |
-| Finnish     | FI   | Russian    | RU   |
-| French      | FR   | Slovak     | SK   |
-| Hungarian   | HU   | Slovenian  | SL   |
-| Indonesian  | ID   | Swedish    | SV   |
-|             |      | Turkish    | TR   |
-|             |      | Ukrainian  | UK   |
-|             |      | Chinese    | ZH   |
-
-## Output File Naming
-
-Format: `{original_name}_{language_code}_{unix_timestamp}.docx`
-
-**Example:**
-- Input: `report.docx`
-- Output: `report_fr_1729705432.docx`
-
-## Rate Limiting
-
-The application includes a **0.4 second delay** between translation requests to avoid API rate limiting (lines 208, 222, 250).
-
-## Error Handling
-
-- **Validation Errors** - Missing API key or file path
-- **Translation Errors** - Individual item failures logged but don't stop process
-- **Critical Errors** - Caught and displayed in error dialog
-- **Resource Cleanup** - Ensures Word COM objects are properly closed
-
-## Threading Model
-
-- **Main Thread** - GUI event loop
-- **Worker Thread** - Translation process (daemon thread)
-- **Thread Safety** - UI updates via `update_idletasks()`
-
-## Technical Notes
-
-### Why Word COM Automation?
-
-The `python-docx` library cannot access text boxes in Word documents. The application uses Windows COM automation (`win32com.client`) to:
-1. Open the document in Word
-2. Iterate through Shapes collection
-3. Translate text box content
-4. Save the modified document
-
-### Temporary File Workflow
-
-1. Translate paragraphs and tables with `python-docx`
-2. Save as `{name}_temp.docx`
-3. Open temp file with Word COM
-4. Translate text boxes
-5. Save as final file
-6. Delete temp file
+Bare `EN`, `PT` and `ZH` are mapped to `EN-GB`, `PT-PT` and `ZH-HANS`.
 
 ## Limitations
 
-- **Windows Only** - Requires Microsoft Word installed (COM automation)
-- **DOCX Format** - Only supports .docx files (not .doc)
-- **Sequential Processing** - Translates items one at a time
-- **No Batch Mode** - Single document per run
-
-## Security Considerations
-
-- API key masked by default with show/hide toggle
-- API key stored in .env file (should be in .gitignore)
-- No validation of API key format or permissions
-
-## Future Improvements
-
-- Batch document processing
-- Parallel translation for better performance
-- Support for additional file formats
-- Translation memory/cache
-- Source language detection
-- Formality settings for supported languages
-- Glossary support
-
-## License
-
-Not specified in the file.
-
-## Author
-
-Not specified in the file.
+- Only `.docx` (not `.doc`, `.pdf`).
+- Comments, charts and SmartArt text are not translated.
+- When DeepL reorders words across formatting boundaries, formatting can land on a neighbouring word (text is always in the right order).
+- One document per run.
