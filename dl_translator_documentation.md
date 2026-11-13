@@ -9,7 +9,7 @@ The project translates Microsoft Word (`.docx`) documents with the DeepL API whi
 | `docx_translate.py` | Shared translation engine (no UI) |
 | `dl_translator.py` | Desktop GUI (tkinter) |
 | `app.py` + `templates/index.html` | Web front end (Flask) |
-| `op2.py` | Command-line tool (`tl_fast.py` and `tldl.py` are kept as aliases) |
+| `op2.py` | Command-line tool |
 
 ## Dependencies
 
